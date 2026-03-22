@@ -1,4 +1,10 @@
+import os
 import pytest
+
+# Set required env vars before any bot modules are imported
+os.environ.setdefault("BOT_TOKEN", "test_token")
+os.environ.setdefault("SUPER_ADMIN_ID", "0")
+
 from bot.database.connection import get_db, init_db, close_db
 from bot.database.models import create_tables
 
