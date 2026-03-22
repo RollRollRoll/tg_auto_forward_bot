@@ -202,9 +202,18 @@ Regex match first, then yt-dlp `extract_info` to verify the link contains downlo
 
 ```python
 ydl_opts = {
-    'format': f'best[height<={max_resolution}]'
-              f'/bestvideo[height<={max_resolution}]+bestaudio'
-              f'/best',
+    'format': (
+        # Priority 1: H.264+AAC in MP4, resolution-limited — ideal for inline playback
+        f'best[vcodec^=avc][acodec^=mp4a][height<={max_resolution}]'
+        # Priority 2: H.264 video + any audio, merge into MP4
+        f'/bestvideo[vcodec^=avc][height<={max_resolution}]+bestaudio[acodec^=mp4a]'
+        f'/bestvideo[vcodec^=avc][height<={max_resolution}]+bestaudio'
+        # Priority 3: any codec, resolution-limited (will need remux/transcode)
+        f'/best[height<={max_resolution}]'
+        f'/bestvideo[height<={max_resolution}]+bestaudio'
+        # Priority 4: absolute fallback
+        f'/best'
+    ),
     'outtmpl': os.path.join(tmp_dir, '%(id)s.%(ext)s'),
     'merge_output_format': 'mp4',
     'postprocessors': [{
@@ -217,7 +226,10 @@ ydl_opts = {
 }
 ```
 
-**Note:** The `filesize` filter is intentionally omitted from the format string because most X/Twitter CDNs do not return `Content-Length` metadata, causing the filter to skip all formats. Instead, file size is checked **after download** (step 4 in Download Flow). The format string only controls resolution.
+**Format selection rationale:**
+- The format string **prefers H.264 (`avc`) + AAC (`mp4a`)** variants first, matching the inline playback requirements defined in the Publishing section. This avoids downloading VP9/AV1/Opus when the source has an H.264 variant available, preventing unnecessary fallback to `send_document()`.
+- The `filesize` filter is intentionally omitted because most X/Twitter CDNs do not return `Content-Length` metadata. File size is checked **after download** (step 4 in Download Flow).
+- If only Priority 3/4 matches (non-H.264 source), the post-download processing will attempt remux. If that's not possible, `send_document()` fallback applies.
 
 ### Download Flow
 
@@ -296,14 +308,33 @@ Documented in `/start` help message with supported tag list and character limit.
 
 **Per-user:** ConversationHandler enforces one active session per user — sequential by design.
 
-**Global concurrency limit:** An `asyncio.Semaphore` caps concurrent downloads at the value of `max_concurrent_downloads` (default 2). The semaphore is checked with `try_acquire` (non-blocking) at the start of the download-and-publish phase (after channel is determined). Behavior:
+**Global concurrency limit:** A simple integer counter (`_active_downloads`) with an `asyncio.Lock` guards the download-and-publish phase. The counter is checked at entry (after channel is determined):
 
-- **Slot available:** Acquire semaphore, proceed to download. Release in `finally` after publish or failure.
+```python
+# In downloader service (singleton)
+_active_downloads: int = 0
+_lock = asyncio.Lock()
+
+async def try_acquire_slot(max_slots: int) -> bool:
+    async with _lock:
+        if _active_downloads >= max_slots:
+            return False
+        _active_downloads += 1  # noqa: not a global reassign, it's a module-level counter
+        return True
+
+async def release_slot():
+    async with _lock:
+        _active_downloads -= 1
+```
+
+Behavior:
+
+- **Slot available:** Counter increments, proceed to download. Decrement in `finally` after publish or failure.
 - **No slot available:** Immediately reject: "Server busy (X/Y download slots in use). Please resend your link to try again." The conversation ends (`ConversationHandler.END`). No queuing, no background retry, no hidden state. The user simply starts a new conversation when ready.
 
-This avoids introducing queue semantics, extra states (QUEUED/PROCESSING), or stale-task-on-restart problems. The conversation state machine stays at exactly two states (WAITING_CAPTION, WAITING_CHANNEL). `/cancel` only applies during these two states; once the download phase starts, it runs to completion (or failure) and the conversation ends.
+This avoids `asyncio.Semaphore` (which lacks a non-blocking try-acquire in the stdlib), avoids queue semantics, extra states (QUEUED/PROCESSING), or stale-task-on-restart problems. The conversation state machine stays at exactly two states (WAITING_CAPTION, WAITING_CHANNEL). `/cancel` only applies during these two states; once the download phase starts, it runs to completion (or failure) and the conversation ends.
 
-**Pre-download disk check:** Before acquiring the semaphore, check available disk space on the download volume (`shutil.disk_usage`). Required free space = `(max_concurrent_downloads + 1) * max_file_size_mb * 2` MB. The `+1` accounts for the current task; the `*2` accounts for yt-dlp temp files + faststart remux producing a second copy during processing. If below threshold, reject with: "Insufficient disk space, please try again later" and log a warning.
+**Pre-download disk check:** Before acquiring a slot, check available disk space on the download volume (`shutil.disk_usage`). Required free space = `max_concurrent_downloads * max_file_size_mb * 2` MB. `max_concurrent_downloads` already includes the current task (the slot hasn't been acquired yet, but the formula reserves space for all possible concurrent tasks at full capacity). The `*2` factor accounts for yt-dlp temp files + faststart remux producing a second copy during processing. If below threshold, reject with: "Insufficient disk space, please try again later" and log a warning.
 
 **Cleanup:** Temp files are cleaned in a `finally` block per download task. On bot startup, any stale files in the download directory older than 1 hour are purged.
 
