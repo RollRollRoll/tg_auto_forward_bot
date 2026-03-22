@@ -86,6 +86,12 @@ WAITING_CHANNEL = 1     # Caption received, waiting for channel selection (multi
 
 The conversation auto-advances past WAITING_CHANNEL when only one channel is configured. After channel is determined (either by auto-select or user pick), download and publish happen automatically — no extra confirmation step.
 
+### Private Chat Enforcement
+
+**All handlers** (conversation entry, admin commands, user commands) must check `update.effective_chat.type == ChatType.PRIVATE` as the first guard. This is implemented as a shared decorator/filter applied uniformly to every handler registration — not left to individual handler functions.
+
+If a message arrives from a group or channel, the bot silently ignores it (no response, no error). This prevents admins from accidentally triggering commands or conversations in shared groups.
+
 ## Database Design
 
 ### admins
@@ -120,6 +126,7 @@ Default settings:
 Allowed settings keys and valid ranges:
 - `max_resolution`: one of `"360"`, `"480"`, `"720"`, `"1080"`, `"1440"`, `"2160"`
 - `max_file_size_mb`: integer between `1` and `2000`
+- `max_concurrent_downloads`: integer between `1` and `5` (default: `"2"`)
 
 The `/set` command validates keys against this whitelist and values against their allowed ranges.
 
@@ -155,7 +162,7 @@ The `/set` command validates keys against this whitelist and values against thei
 | `/add_admin <user_id>` | Add admin (super admin only) |
 | `/remove_admin <user_id>` | Remove admin (super admin only) |
 | `/list_admins` | List all admins |
-| `/add_channel <chat_id> <title>` | Add target Channel |
+| `/add_channel <chat_id> <title>` | Add target Channel (validates bot access on add) |
 | `/remove_channel <chat_id>` | Remove Channel |
 | `/list_channels` | List all Channels |
 | `/set <key> <value>` | Update config |
@@ -166,6 +173,16 @@ The `/set` command validates keys against this whitelist and values against thei
 
 - **Super Admin** (`SUPER_ADMIN_ID` env var): Can manage other admins + all admin functions
 - **Admin**: Can post videos, manage Channels and settings, but cannot add/remove admins
+
+### Channel Validation on Add
+
+When `/add_channel` is called, the bot performs upfront validation **before** writing to the database:
+
+1. **`get_chat(chat_id)`** — verifies the chat_id exists and is a channel. If it fails: "Invalid chat_id or bot has no access to this channel."
+2. **`get_chat_member(chat_id, bot.id)`** — verifies the bot is a member of the channel with posting permissions (administrator with `can_post_messages`). If it fails: "Bot is not an admin of this channel. Please add the bot as a channel admin first."
+3. Only after both checks pass, write to the `channels` table with the title from `get_chat` result (ignoring user-provided title if it differs, to ensure accuracy).
+
+This catches mistyped chat_ids and missing permissions at config time, not at first publish.
 
 ## Video Download Logic
 
@@ -187,6 +204,13 @@ ydl_opts = {
               f'/best',
     'outtmpl': os.path.join(tmp_dir, '%(id)s.%(ext)s'),
     'merge_output_format': 'mp4',
+    'postprocessors': [{
+        'key': 'FFmpegVideoConvertor',
+        'preferedformat': 'mp4',
+    }],
+    'postprocessor_args': {
+        'ffmpeg': ['-movflags', '+faststart'],  # moov atom at front for streaming
+    },
 }
 ```
 
@@ -202,18 +226,53 @@ ydl_opts = {
 
 ## Publishing Logic
 
-1. Use `bot.send_video()` to send to target Channel
+### Inline Video Playback Constraints
+
+Telegram renders inline video players based on the **video file itself**, not metadata parameters. The key requirements:
+
+1. **Container**: MP4 (with moov atom at the front for streaming)
+2. **Video codec**: H.264
+3. **Audio codec**: AAC
+4. **`supports_streaming=True`** in `send_video()` — signals the client to attempt streaming playback
+
+`thumbnail`, `duration`, `width`, `height` are cosmetic hints only — they do NOT determine whether Telegram shows an inline player or a generic file icon.
+
+### Post-Download Processing
+
+After yt-dlp download, verify the file meets streaming requirements:
+1. Check container is MP4 with H.264+AAC (via `yt-dlp` merge or `ffprobe` metadata inspection)
+2. Ensure moov atom is at the front of the file. If not (e.g. after `yt-dlp` merge), run `ffmpeg -movflags +faststart` to relocate it. This is a fast metadata-only operation, not a re-encode.
+3. If the video cannot be made streaming-compatible (rare edge case, e.g. non-H.264 source with no ffmpeg available), fall back to `send_document()` and notify the user: "Video sent as file (non-streamable format). Viewers will need to download before playing."
+
+### Send Flow
+
+1. Use `bot.send_video()` with `supports_streaming=True` to send to target Channel
 2. Pass `caption` with user text, `parse_mode='HTML'` for rich text
-3. Pass video metadata from yt-dlp `extract_info`: `duration`, `width`, `height`, and `thumbnail` (download thumbnail to temp file) so Telegram renders an inline video player instead of a generic file
+3. Optionally pass `duration`, `width`, `height` from yt-dlp `extract_info` as display hints
 4. On success, get `message_id` and log to `post_logs`
 5. Reply to user with success message + Channel message link
 
-### Rich Text Format
+### Caption Validation and Normalization
 
-HTML format (more reliable than Markdown in Telegram):
-- Supported tags: `<b>`, `<i>`, `<u>`, `<s>`, `<a href="...">`, `<code>`, `<pre>`
-- User-provided caption is sanitized: unsupported HTML tags are stripped before sending to avoid Telegram API errors
-- Documented in `/start` help message
+Caption processing happens **before** download starts (fail fast):
+
+**Step 1 — HTML normalization:**
+- Parse input with a whitelist-based sanitizer (e.g. `bleach` or manual parser)
+- Allowed tags: `<b>`, `<i>`, `<u>`, `<s>`, `<a href="...">`, `<code>`, `<pre>`
+- Strip all other tags (keep inner text)
+- Fix unclosed/mismatched tags
+- Escape bare `<`, `>`, `&` characters outside tags (Telegram requires `&lt;` `&gt;` `&amp;`)
+
+**Step 2 — Length validation:**
+- Telegram `send_video` caption limit: **1024 characters** (after entity parsing)
+- After normalization, check the plain-text length (tags stripped) against 1024
+- If over limit, reject immediately: "Caption too long (X/1024 chars). Please shorten and resend."
+- User stays in WAITING_CAPTION state to retry
+
+**Step 3 — Preview (optional):**
+- After validation passes, show the user a preview of the normalized caption before proceeding
+
+Documented in `/start` help message with supported tag list and character limit.
 
 ## Error Handling
 
@@ -222,13 +281,23 @@ HTML format (more reliable than Markdown in Telegram):
 | Invalid / non-X link | "Please send a valid X video link" |
 | yt-dlp download failure | "Download failed, please check if the link contains a video" |
 | File exceeds size limit | "Video too large (XXX MB), exceeds limit (YYY MB)" |
-| Channel send failure | "Send failed, please check if Bot is a Channel admin" |
+| Channel send failure | "Send failed, please check Bot permissions." (Should be rare — channel validated on add) |
+| Caption too long | "Caption too long (X/1024 chars). Please shorten and resend." (stays in WAITING_CAPTION) |
+| Insufficient disk space | "Insufficient disk space, please try again later" |
+| Concurrency limit reached | "Server busy, please wait... (X tasks in progress)" |
+| Non-streamable video | Falls back to `send_document()` with notice to user |
 | Network timeout | "Network timeout, please try again later" |
 | Unsupported HTML tags in caption | Strip unsupported tags silently, send with clean HTML |
 
-### Concurrency
+### Concurrency and Disk Safety
 
-Downloads are processed sequentially per user (ConversationHandler enforces one active session per user). If multiple admins submit links concurrently, downloads happen in parallel. No global concurrency limit is imposed — for a small admin team this is acceptable. If disk usage becomes a concern, it can be addressed later with a download queue.
+**Per-user:** ConversationHandler enforces one active session per user — sequential by design.
+
+**Global concurrency limit:** An `asyncio.Semaphore` caps concurrent downloads at **2** (configurable via settings key `max_concurrent_downloads`, integer 1-5). When the limit is reached, the next user entering the download phase receives: "Server busy, please wait... (X tasks in progress)" and their conversation state remains at WAITING_CHANNEL / post-channel-selection, retrying automatically when a slot opens.
+
+**Pre-download disk check:** Before starting a yt-dlp download, check available disk space on the download volume (`shutil.disk_usage`). If free space is below **twice** the `max_file_size_mb` setting (to accommodate concurrent downloads), reject with: "Insufficient disk space, please try again later" and log a warning. This prevents filling the shared volume.
+
+**Cleanup:** Temp files are cleaned in a `finally` block per download task. On bot startup, any stale files in the download directory older than 1 hour are purged.
 
 ## Project Structure
 
@@ -264,6 +333,23 @@ tg_auto_forward_bot/
 ```
 
 ## Deployment
+
+### Prerequisite: Switch Bot to Local API Server
+
+Before the bot can receive updates from a Local Bot API Server, you **must** call `logOut` on the official Telegram API. This is a one-time operation per bot token migration:
+
+```bash
+# Call logOut via the OFFICIAL Telegram API (not your local server)
+curl https://api.telegram.org/bot<BOT_TOKEN>/logOut
+```
+
+**Rules:**
+- After `logOut`, the bot **cannot** use the official API for 10 minutes
+- Only then start the bot against the Local API Server
+- If migrating between two Local API Servers, call `close` on the old server first
+- The bot startup script (`main.py`) should document this requirement and verify connectivity to the Local API Server on startup
+
+The bot's `main.py` will attempt a `getMe` call on startup. If it fails, it logs a clear error message mentioning the `logOut` prerequisite.
 
 ### Environment Variables
 
@@ -327,3 +413,5 @@ yt-dlp
 aiosqlite
 python-dotenv
 ```
+
+**System dependency:** `ffmpeg` must be installed (used by yt-dlp for merging and by the bot for `-movflags +faststart`). The Dockerfile should install it via `apt-get install ffmpeg`.
