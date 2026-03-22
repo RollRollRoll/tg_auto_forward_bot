@@ -50,7 +50,7 @@ User (Private Chat)
 
 | Module | Responsibility |
 |--------|---------------|
-| **Bot Handler** | User interaction, conversation state management (link → caption → channel → confirm) |
+| **Bot Handler** | User interaction, conversation state management (link → caption → channel selection → download → publish) |
 | **Downloader** | yt-dlp video download with quality control |
 | **Publisher** | Send video + caption to target Channel |
 | **Database** | Store config (admin whitelist, channel list, video quality settings, post logs) |
@@ -69,6 +69,22 @@ Bot:   "Downloading video..."
 Bot:   [file too large] "Video too large (XXX MB), cannot send"
 Bot:   [success] "Published to [Channel Name]" + message link
 ```
+
+### ConversationHandler States
+
+```python
+# State constants
+WAITING_CAPTION = 0     # Link received, waiting for caption
+WAITING_CHANNEL = 1     # Caption received, waiting for channel selection (multi-channel only)
+
+# entry_points: MessageHandler with URL regex filter (admin-only)
+# states:
+#   WAITING_CAPTION: MessageHandler for text input
+#   WAITING_CHANNEL: CallbackQueryHandler for inline keyboard selection
+# fallbacks: CommandHandler for /cancel
+```
+
+The conversation auto-advances past WAITING_CHANNEL when only one channel is configured. After channel is determined (either by auto-select or user pick), download and publish happen automatically — no extra confirmation step.
 
 ## Database Design
 
@@ -100,7 +116,12 @@ Bot:   [success] "Published to [Channel Name]" + message link
 Default settings:
 - `max_resolution`: `"1080"` — max video resolution
 - `max_file_size_mb`: `"2000"` — max file size in MB
-- `video_format`: `"mp4"` — preferred video format
+
+Allowed settings keys and valid ranges:
+- `max_resolution`: one of `"360"`, `"480"`, `"720"`, `"1080"`, `"1440"`, `"2160"`
+- `max_file_size_mb`: integer between `1` and `2000`
+
+The `/set` command validates keys against this whitelist and values against their allowed ranges.
 
 ### post_logs
 
@@ -110,9 +131,12 @@ Default settings:
 | admin_user_id | BIGINT | Operator |
 | source_url | TEXT | Original X link |
 | channel_chat_id | BIGINT | Target Channel |
-| message_id | INTEGER | Published message ID |
+| message_id | INTEGER | Published message ID (null until published) |
 | caption | TEXT | Sent caption |
-| created_at | TIMESTAMP | Publish time |
+| status | TEXT | `downloading` / `publishing` / `done` / `failed` |
+| error_message | TEXT | Error details if status is `failed` (nullable) |
+| created_at | TIMESTAMP | Record creation time |
+| updated_at | TIMESTAMP | Last status update time |
 
 ## Bot Commands
 
@@ -150,21 +174,23 @@ Default settings:
 Supported URL patterns:
 - `twitter.com/*/status/*`
 - `x.com/*/status/*`
-- `t.co/*` (short links)
+- `t.co/*` short links — Bot resolves via HTTP HEAD redirect before passing to yt-dlp
 
-Regex match + yt-dlp `extract_info` to verify the link is parseable.
+Regex match first, then yt-dlp `extract_info` to verify the link contains downloadable video.
 
 ### Download Parameters
 
 ```python
 ydl_opts = {
-    'format': f'best[height<={max_resolution}][filesize<{max_file_size}M]'
+    'format': f'best[height<={max_resolution}]'
               f'/bestvideo[height<={max_resolution}]+bestaudio'
-              f'/best[height<={max_resolution}]',
+              f'/best',
     'outtmpl': os.path.join(tmp_dir, '%(id)s.%(ext)s'),
     'merge_output_format': 'mp4',
 }
 ```
+
+**Note:** The `filesize` filter is intentionally omitted from the format string because most X/Twitter CDNs do not return `Content-Length` metadata, causing the filter to skip all formats. Instead, file size is checked **after download** (step 4 in Download Flow). The format string only controls resolution.
 
 ### Download Flow
 
@@ -177,14 +203,16 @@ ydl_opts = {
 ## Publishing Logic
 
 1. Use `bot.send_video()` to send to target Channel
-2. `caption` parameter with user text, `parse_mode='HTML'` for rich text
-3. On success, get `message_id` and log to `post_logs`
-4. Reply to user with success message + Channel message link
+2. Pass `caption` with user text, `parse_mode='HTML'` for rich text
+3. Pass video metadata from yt-dlp `extract_info`: `duration`, `width`, `height`, and `thumbnail` (download thumbnail to temp file) so Telegram renders an inline video player instead of a generic file
+4. On success, get `message_id` and log to `post_logs`
+5. Reply to user with success message + Channel message link
 
 ### Rich Text Format
 
 HTML format (more reliable than Markdown in Telegram):
-- `<b>bold</b>`, `<i>italic</i>`, `<a href="...">link</a>`, `<code>code</code>`
+- Supported tags: `<b>`, `<i>`, `<u>`, `<s>`, `<a href="...">`, `<code>`, `<pre>`
+- User-provided caption is sanitized: unsupported HTML tags are stripped before sending to avoid Telegram API errors
 - Documented in `/start` help message
 
 ## Error Handling
@@ -196,6 +224,11 @@ HTML format (more reliable than Markdown in Telegram):
 | File exceeds size limit | "Video too large (XXX MB), exceeds limit (YYY MB)" |
 | Channel send failure | "Send failed, please check if Bot is a Channel admin" |
 | Network timeout | "Network timeout, please try again later" |
+| Unsupported HTML tags in caption | Strip unsupported tags silently, send with clean HTML |
+
+### Concurrency
+
+Downloads are processed sequentially per user (ConversationHandler enforces one active session per user). If multiple admins submit links concurrently, downloads happen in parallel. No global concurrency limit is imposed — for a small admin team this is acceptable. If disk usage becomes a concern, it can be addressed later with a download queue.
 
 ## Project Structure
 
@@ -251,10 +284,11 @@ services:
     environment:
       TELEGRAM_API_ID: ${API_ID}
       TELEGRAM_API_HASH: ${API_HASH}
+      TELEGRAM_LOCAL: "true"          # Enable local mode for 2000MB upload limit
     ports:
       - "8081:8081"
     volumes:
-      - bot-api-data:/var/lib/telegram-bot-api
+      - shared-data:/var/lib/telegram-bot-api
 
   bot:
     build: .
@@ -264,13 +298,16 @@ services:
       SUPER_ADMIN_ID: ${SUPER_ADMIN_ID}
     volumes:
       - bot-data:/app/data
+      - shared-data:/var/lib/telegram-bot-api  # Shared volume for local file path uploads
     depends_on:
       - telegram-bot-api
 
 volumes:
-  bot-api-data:
-  bot-data:
+  shared-data:    # Shared between bot and API server for local file path passing
+  bot-data:       # SQLite database persistence
 ```
+
+**Local file path uploads:** In local mode, `send_video` can accept a local file path instead of uploading via HTTP. The `shared-data` volume is mounted in both containers so the bot can download files to a path accessible by the API server. The bot downloads to `/var/lib/telegram-bot-api/downloads/` and passes the path directly. This avoids re-uploading large files over HTTP between containers.
 
 ### Direct Run
 
