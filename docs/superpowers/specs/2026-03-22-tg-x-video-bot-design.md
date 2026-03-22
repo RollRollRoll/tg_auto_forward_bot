@@ -234,7 +234,7 @@ ydl_opts = {
 ### Download Flow
 
 1. Call yt-dlp Python API (not subprocess)
-2. Build format selection from `max_resolution` in settings (resolution only; file size is checked post-download)
+2. Build format selection from `max_resolution` and codec preference (H.264+AAC preferred, any codec as fallback); file size is checked post-download
 3. Download to temp directory (`tempfile.mkdtemp()`)
 4. Check file size after download; notify user if over limit
 5. Clean up temp files on both success and failure
@@ -311,20 +311,22 @@ Documented in `/start` help message with supported tag list and character limit.
 **Global concurrency limit:** A simple integer counter (`_active_downloads`) with an `asyncio.Lock` guards the download-and-publish phase. The counter is checked at entry (after channel is determined):
 
 ```python
-# In downloader service (singleton)
-_active_downloads: int = 0
-_lock = asyncio.Lock()
+# In downloader service (singleton instance)
+class DownloadSlotManager:
+    def __init__(self):
+        self._active_downloads: int = 0
+        self._lock = asyncio.Lock()
 
-async def try_acquire_slot(max_slots: int) -> bool:
-    async with _lock:
-        if _active_downloads >= max_slots:
+async def try_acquire_slot(self, max_slots: int) -> bool:
+    async with self._lock:
+        if self._active_downloads >= max_slots:
             return False
-        _active_downloads += 1  # noqa: not a global reassign, it's a module-level counter
+        self._active_downloads += 1
         return True
 
-async def release_slot():
-    async with _lock:
-        _active_downloads -= 1
+async def release_slot(self):
+    async with self._lock:
+        self._active_downloads -= 1
 ```
 
 Behavior:
