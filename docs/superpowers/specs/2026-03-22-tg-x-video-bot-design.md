@@ -317,16 +317,16 @@ class DownloadSlotManager:
         self._active_downloads: int = 0
         self._lock = asyncio.Lock()
 
-async def try_acquire_slot(self, max_slots: int) -> bool:
-    async with self._lock:
-        if self._active_downloads >= max_slots:
-            return False
-        self._active_downloads += 1
-        return True
+    async def try_acquire_slot(self, max_slots: int) -> bool:
+        async with self._lock:
+            if self._active_downloads >= max_slots:
+                return False
+            self._active_downloads += 1
+            return True
 
-async def release_slot(self):
-    async with self._lock:
-        self._active_downloads -= 1
+    async def release_slot(self):
+        async with self._lock:
+            self._active_downloads -= 1
 ```
 
 Behavior:
