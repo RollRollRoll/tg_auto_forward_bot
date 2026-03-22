@@ -75,8 +75,14 @@ async def create_post_log(db: aiosqlite.Connection, *, admin_user_id: int, sourc
     return cursor.lastrowid
 
 async def update_post_log_status(db: aiosqlite.Connection, log_id: int, *, status: str, message_id: int | None = None, error_message: str | None = None) -> None:
-    await db.execute(
-        "UPDATE post_logs SET status = ?, message_id = ?, error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-        (status, message_id, error_message, log_id),
-    )
+    fields = ["status = ?", "updated_at = CURRENT_TIMESTAMP"]
+    params: list = [status]
+    if message_id is not None:
+        fields.append("message_id = ?")
+        params.append(message_id)
+    if error_message is not None:
+        fields.append("error_message = ?")
+        params.append(error_message)
+    params.append(log_id)
+    await db.execute(f"UPDATE post_logs SET {', '.join(fields)} WHERE id = ?", params)
     await db.commit()

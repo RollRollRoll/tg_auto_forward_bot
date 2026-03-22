@@ -21,7 +21,8 @@ async def test_pipeline_rejects_when_no_slot():
     bot = AsyncMock()
     get_setting_fn = await _make_get_setting()
     with patch("bot.services.pipeline.get_db", new_callable=AsyncMock), \
-         patch("bot.services.pipeline.get_setting", side_effect=get_setting_fn):
+         patch("bot.services.pipeline.get_setting", side_effect=get_setting_fn), \
+         patch("bot.services.pipeline.check_disk_space", return_value=(True, 5000)):
         await download_and_publish(
             bot=bot, slot_manager=slot_mgr, user_chat_id=111, user_id=111,
             source_url="https://x.com/u/status/1", caption="test", channel_chat_id=-100123,

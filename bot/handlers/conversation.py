@@ -98,7 +98,10 @@ async def _start_download(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             source_url=source_url, caption=caption, channel_chat_id=channel_chat_id,
         )
     )
-    task.add_done_callback(lambda t: t.exception() if not t.cancelled() and t.exception() else None)
+    def _on_task_done(t):
+        if not t.cancelled() and t.exception():
+            logger.error("Background download task failed unexpectedly: %s", t.exception())
+    task.add_done_callback(_on_task_done)
 
     context.user_data.clear()
     return ConversationHandler.END

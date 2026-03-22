@@ -21,6 +21,12 @@ async def download_and_publish(
     max_file_size = int(await get_setting(db, "max_file_size_mb") or "2000")
     max_resolution = int(await get_setting(db, "max_resolution") or "1080")
 
+    # Disk check BEFORE slot acquisition (per spec)
+    has_space, free_mb = check_disk_space(max_concurrent, max_file_size)
+    if not has_space:
+        await bot.send_message(chat_id=user_chat_id, text="Insufficient disk space, please try again later.")
+        return
+
     if not await slot_manager.try_acquire_slot(max_concurrent):
         active = slot_manager.active_count
         await bot.send_message(
@@ -32,11 +38,6 @@ async def download_and_publish(
     log_id = None
     tmp_dir = None
     try:
-        has_space, free_mb = check_disk_space(max_concurrent, max_file_size)
-        if not has_space:
-            await bot.send_message(chat_id=user_chat_id, text="Insufficient disk space, please try again later.")
-            return
-
         log_id = await create_post_log(
             db, admin_user_id=user_id, source_url=source_url,
             channel_chat_id=channel_chat_id, caption=caption,
