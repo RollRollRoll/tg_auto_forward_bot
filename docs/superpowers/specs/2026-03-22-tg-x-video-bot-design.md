@@ -65,12 +65,17 @@ Bot:   "Please enter the caption (HTML format supported)"
 User:  sends caption
 Bot:   [multiple channels] → Inline Keyboard to select target Channel
        [single channel] → skip selection
-Bot:   "Downloading video..."
-Bot:   [file too large] "Video too large (XXX MB), cannot send"
-Bot:   [success] "Published to [Channel Name]" + message link
+Bot:   "Task accepted. Downloading video..."  ← conversation ENDS here
+       (user is free to submit another link immediately)
+Bot:   [async, file too large] "Video too large (XXX MB), cannot send"
+Bot:   [async, success] "Published to [Channel Name]" + message link
 ```
 
-### ConversationHandler States
+### ConversationHandler States and Execution Model
+
+The conversation and the download/publish are **separate phases** with different execution models:
+
+**Phase 1 — Conversation (synchronous, blocking per-user):**
 
 ```python
 # State constants
@@ -84,7 +89,35 @@ WAITING_CHANNEL = 1     # Caption received, waiting for channel selection (multi
 # fallbacks: CommandHandler for /cancel
 ```
 
-The conversation auto-advances past WAITING_CHANNEL when only one channel is configured. After channel is determined (either by auto-select or user pick), download and publish happen automatically — no extra confirmation step.
+The conversation auto-advances past WAITING_CHANNEL when only one channel is configured. Once the channel is determined, the handler:
+1. Validates caption (HTML normalization + length check)
+2. Replies "Task accepted. Downloading video..."
+3. Returns `ConversationHandler.END` — **the conversation is over**
+4. Spawns a background `asyncio.Task` for the download/publish phase
+
+**Phase 2 — Download & Publish (background `asyncio.Task`, concurrent):**
+
+```python
+# Spawned from the final conversation handler, AFTER ConversationHandler.END
+task = asyncio.create_task(
+    download_and_publish(bot, user_id, chat_id, source_url, caption, channel_chat_id)
+)
+# Fire-and-forget; task reports results back to user via bot.send_message()
+```
+
+The background task:
+1. Acquires a download slot via `DownloadSlotManager.try_acquire_slot()`
+   - If no slot: sends "Server busy..." message to user, task exits
+2. Checks disk space
+3. Downloads video with yt-dlp
+4. Post-processes (faststart, codec check)
+5. Publishes to channel via `bot.send_video()`
+6. Sends success/failure notification to user via `bot.send_message()`
+7. Releases download slot in `finally`
+
+**Why this split matters:** `python-telegram-bot` processes updates sequentially through handlers. If download (which can take minutes) ran inside a handler via `await`, it would block all other updates — no other admin could even start a conversation. By ending the conversation first and spawning a background task, the handler returns immediately, unblocking the update queue. Multiple background tasks run concurrently via the event loop, achieving the parallel download goal.
+
+**Consequence:** Since the conversation ends before download starts, `/cancel` cannot cancel an in-progress download. This is acceptable — downloads are typically short (< 1 minute for most X videos), and adding cancellation would require task tracking infrastructure that isn't justified at this scale.
 
 ### Private Chat Enforcement
 
@@ -306,9 +339,9 @@ Documented in `/start` help message with supported tag list and character limit.
 
 ### Concurrency and Disk Safety
 
-**Per-user:** ConversationHandler enforces one active session per user — sequential by design.
+**Per-user conversation:** ConversationHandler enforces one active conversation per user. But since the conversation ends before download starts, a user can start a new conversation while their previous download is still running in the background.
 
-**Global concurrency limit:** A simple integer counter (`_active_downloads`) with an `asyncio.Lock` guards the download-and-publish phase. The counter is checked at entry (after channel is determined):
+**Global concurrency limit:** A `DownloadSlotManager` guards the background download tasks. The slot is acquired as the first step inside the background `asyncio.Task` (not inside the conversation handler):
 
 ```python
 # In downloader service (singleton instance)
@@ -332,9 +365,9 @@ class DownloadSlotManager:
 Behavior:
 
 - **Slot available:** Counter increments, proceed to download. Decrement in `finally` after publish or failure.
-- **No slot available:** Immediately reject: "Server busy (X/Y download slots in use). Please resend your link to try again." The conversation ends (`ConversationHandler.END`). No queuing, no background retry, no hidden state. The user simply starts a new conversation when ready.
+- **No slot available:** The background task sends "Server busy (X/Y download slots in use). Please resend your link to try again." to the user and exits. No queuing, no retry.
 
-This avoids `asyncio.Semaphore` (which lacks a non-blocking try-acquire in the stdlib), avoids queue semantics, extra states (QUEUED/PROCESSING), or stale-task-on-restart problems. The conversation state machine stays at exactly two states (WAITING_CAPTION, WAITING_CHANNEL). `/cancel` only applies during these two states; once the download phase starts, it runs to completion (or failure) and the conversation ends.
+This avoids `asyncio.Semaphore` (which lacks a non-blocking try-acquire in the stdlib), avoids queue semantics, and avoids stale-task-on-restart problems. The conversation state machine stays at exactly two states (WAITING_CAPTION, WAITING_CHANNEL). `/cancel` only applies during conversation states; background download tasks run to completion (or failure) independently.
 
 **Pre-download disk check:** Before acquiring a slot, check available disk space on the download volume (`shutil.disk_usage`). Required free space = `max_concurrent_downloads * max_file_size_mb * 2` MB. `max_concurrent_downloads` already includes the current task (the slot hasn't been acquired yet, but the formula reserves space for all possible concurrent tasks at full capacity). The `*2` factor accounts for yt-dlp temp files + faststart remux producing a second copy during processing. If below threshold, reject with: "Insufficient disk space, please try again later" and log a warning.
 
