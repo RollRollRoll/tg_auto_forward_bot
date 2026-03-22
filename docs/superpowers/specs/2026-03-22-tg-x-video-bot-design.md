@@ -122,6 +122,7 @@ If a message arrives from a group or channel, the bot silently ignores it (no re
 Default settings:
 - `max_resolution`: `"1080"` — max video resolution
 - `max_file_size_mb`: `"2000"` — max file size in MB
+- `max_concurrent_downloads`: `"2"` — max parallel downloads
 
 Allowed settings keys and valid ranges:
 - `max_resolution`: one of `"360"`, `"480"`, `"720"`, `"1080"`, `"1440"`, `"2160"`
@@ -162,7 +163,7 @@ The `/set` command validates keys against this whitelist and values against thei
 | `/add_admin <user_id>` | Add admin (super admin only) |
 | `/remove_admin <user_id>` | Remove admin (super admin only) |
 | `/list_admins` | List all admins |
-| `/add_channel <chat_id> <title>` | Add target Channel (validates bot access on add) |
+| `/add_channel <chat_id>` | Add target Channel (validates access, fetches title automatically) |
 | `/remove_channel <chat_id>` | Remove Channel |
 | `/list_channels` | List all Channels |
 | `/set <key> <value>` | Update config |
@@ -176,11 +177,13 @@ The `/set` command validates keys against this whitelist and values against thei
 
 ### Channel Validation on Add
 
-When `/add_channel` is called, the bot performs upfront validation **before** writing to the database:
+When `/add_channel <chat_id>` is called, the bot performs upfront validation **before** writing to the database:
 
-1. **`get_chat(chat_id)`** — verifies the chat_id exists and is a channel. If it fails: "Invalid chat_id or bot has no access to this channel."
-2. **`get_chat_member(chat_id, bot.id)`** — verifies the bot is a member of the channel with posting permissions (administrator with `can_post_messages`). If it fails: "Bot is not an admin of this channel. Please add the bot as a channel admin first."
-3. Only after both checks pass, write to the `channels` table with the title from `get_chat` result (ignoring user-provided title if it differs, to ensure accuracy).
+1. **`get_chat(chat_id)`** — verifies the chat_id exists and is a channel. Extracts `chat.title` for display. If it fails: "Invalid chat_id or bot has no access to this channel."
+2. **`get_chat_member(chat_id, bot.id)`** — verifies the bot is a member with posting permissions (administrator with `can_post_messages`). If it fails: "Bot is not an admin of this channel. Please add the bot as a channel admin first."
+3. Only after both checks pass, write to `channels` table with `title` from `get_chat` result.
+
+The command takes only `chat_id` — title is always fetched from Telegram to ensure accuracy. No user-provided title parameter.
 
 This catches mistyped chat_ids and missing permissions at config time, not at first publish.
 
@@ -284,7 +287,7 @@ Documented in `/start` help message with supported tag list and character limit.
 | Channel send failure | "Send failed, please check Bot permissions." (Should be rare — channel validated on add) |
 | Caption too long | "Caption too long (X/1024 chars). Please shorten and resend." (stays in WAITING_CAPTION) |
 | Insufficient disk space | "Insufficient disk space, please try again later" |
-| Concurrency limit reached | "Server busy, please wait... (X tasks in progress)" |
+| Concurrency limit reached | "Server busy (X/Y slots in use). Please resend your link to try again." (conversation ends) |
 | Non-streamable video | Falls back to `send_document()` with notice to user |
 | Network timeout | "Network timeout, please try again later" |
 | Unsupported HTML tags in caption | Strip unsupported tags silently, send with clean HTML |
@@ -293,9 +296,14 @@ Documented in `/start` help message with supported tag list and character limit.
 
 **Per-user:** ConversationHandler enforces one active session per user — sequential by design.
 
-**Global concurrency limit:** An `asyncio.Semaphore` caps concurrent downloads at **2** (configurable via settings key `max_concurrent_downloads`, integer 1-5). When the limit is reached, the next user entering the download phase receives: "Server busy, please wait... (X tasks in progress)" and their conversation state remains at WAITING_CHANNEL / post-channel-selection, retrying automatically when a slot opens.
+**Global concurrency limit:** An `asyncio.Semaphore` caps concurrent downloads at the value of `max_concurrent_downloads` (default 2). The semaphore is checked with `try_acquire` (non-blocking) at the start of the download-and-publish phase (after channel is determined). Behavior:
 
-**Pre-download disk check:** Before starting a yt-dlp download, check available disk space on the download volume (`shutil.disk_usage`). If free space is below **twice** the `max_file_size_mb` setting (to accommodate concurrent downloads), reject with: "Insufficient disk space, please try again later" and log a warning. This prevents filling the shared volume.
+- **Slot available:** Acquire semaphore, proceed to download. Release in `finally` after publish or failure.
+- **No slot available:** Immediately reject: "Server busy (X/Y download slots in use). Please resend your link to try again." The conversation ends (`ConversationHandler.END`). No queuing, no background retry, no hidden state. The user simply starts a new conversation when ready.
+
+This avoids introducing queue semantics, extra states (QUEUED/PROCESSING), or stale-task-on-restart problems. The conversation state machine stays at exactly two states (WAITING_CAPTION, WAITING_CHANNEL). `/cancel` only applies during these two states; once the download phase starts, it runs to completion (or failure) and the conversation ends.
+
+**Pre-download disk check:** Before acquiring the semaphore, check available disk space on the download volume (`shutil.disk_usage`). Required free space = `(max_concurrent_downloads + 1) * max_file_size_mb * 2` MB. The `+1` accounts for the current task; the `*2` accounts for yt-dlp temp files + faststart remux producing a second copy during processing. If below threshold, reject with: "Insufficient disk space, please try again later" and log a warning.
 
 **Cleanup:** Temp files are cleaned in a `finally` block per download task. On bot startup, any stale files in the download directory older than 1 hour are purged.
 
@@ -393,7 +401,30 @@ volumes:
   bot-data:       # SQLite database persistence
 ```
 
-**Local file path uploads:** In local mode, `send_video` can accept a local file path instead of uploading via HTTP. The `shared-data` volume is mounted in both containers so the bot can download files to a path accessible by the API server. The bot downloads to `/var/lib/telegram-bot-api/downloads/` and passes the path directly. This avoids re-uploading large files over HTTP between containers.
+### Local Mode Configuration (Critical)
+
+Using local file paths requires **both** server-side and client-side local mode:
+
+**Server side:** `TELEGRAM_LOCAL: "true"` in the `telegram-bot-api` container (already configured above).
+
+**Client side (`config.py` / `main.py`):** The `python-telegram-bot` `Application` must be built with `local_mode=True`. Without this, PTB reads the file into bytes and uploads via HTTP multipart — defeating the shared volume design entirely.
+
+```python
+from telegram.ext import ApplicationBuilder
+
+app = (
+    ApplicationBuilder()
+    .token(BOT_TOKEN)
+    .base_url(f"{API_BASE_URL}/bot")
+    .base_file_url(f"{API_BASE_URL}/file/bot")
+    .local_mode(True)   # REQUIRED: tells PTB to pass file paths directly
+    .build()
+)
+```
+
+When `local_mode=True` is set and a `pathlib.Path` or string path is passed to `send_video()`, PTB sends the **file URI** (`file:///path/to/video.mp4`) to the Local API Server, which reads the file directly from the shared filesystem. This is what makes the shared volume (`shared-data`) work.
+
+**Download path:** The bot must download videos to a path inside the shared volume — specifically `/var/lib/telegram-bot-api/downloads/` — so the API Server can access them. In direct-run mode (no Docker), both the bot and the API Server must share the same filesystem path.
 
 ### Direct Run
 
