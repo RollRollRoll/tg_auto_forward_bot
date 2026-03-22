@@ -1,0 +1,5 @@
+python-telegram-bot[ext]>=20.0
+yt-dlp
+aiosqlite
+python-dotenv
+httpx
