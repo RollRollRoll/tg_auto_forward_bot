@@ -195,7 +195,7 @@ ydl_opts = {
 ### Download Flow
 
 1. Call yt-dlp Python API (not subprocess)
-2. Build format selection from `max_resolution` and `max_file_size_mb` in settings
+2. Build format selection from `max_resolution` in settings (resolution only; file size is checked post-download)
 3. Download to temp directory (`tempfile.mkdtemp()`)
 4. Check file size after download; notify user if over limit
 5. Clean up temp files on both success and failure
