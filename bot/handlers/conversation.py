@@ -1,5 +1,4 @@
 from __future__ import annotations
-import asyncio
 import logging
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -91,21 +90,14 @@ async def _start_download(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     slot_manager = context.bot_data["slot_manager"]
 
-    tasks = context.bot_data.setdefault("_background_tasks", set())
-    task = asyncio.create_task(
+    context.application.create_task(
         download_and_publish(
             bot=context.bot, slot_manager=slot_manager,
             user_chat_id=user_chat_id, user_id=user_id,
             source_url=source_url, caption=caption, channel_chat_id=channel_chat_id,
-        )
+        ),
+        update=update,
     )
-    tasks.add(task)
-    task.add_done_callback(tasks.discard)
-
-    def _on_task_done(t):
-        if not t.cancelled() and t.exception():
-            logger.error("Background download task failed unexpectedly: %s", t.exception())
-    task.add_done_callback(_on_task_done)
 
     context.user_data.clear()
     return ConversationHandler.END

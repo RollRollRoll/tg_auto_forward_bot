@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import os
 
@@ -39,19 +38,8 @@ async def post_init(application) -> None:
     logger.info("Bot started: @%s (id=%d)", me.username, me.id)
 
 
-async def post_shutdown(application) -> None:
-    tasks = application.bot_data.get("_background_tasks", set())
-    if tasks:
-        logger.info("Waiting for %d background task(s) to finish...", len(tasks))
-        done, pending = await asyncio.wait(set(tasks), timeout=120.0)
-        if pending:
-            logger.warning(
-                "Shutdown timeout: %d task(s) still running, cancelling...",
-                len(pending),
-            )
-            for t in pending:
-                t.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
+async def post_stop(application) -> None:
+    """Called after Application.stop() awaits all create_task tasks, before shutdown."""
     await close_db()
 
 
@@ -63,7 +51,7 @@ def main() -> None:
         .base_file_url(f"{API_BASE_URL}/file/bot")
         .local_mode(True)
         .post_init(post_init)
-        .post_shutdown(post_shutdown)
+        .post_stop(post_stop)
         .build()
     )
     app.bot_data["slot_manager"] = DownloadSlotManager()
