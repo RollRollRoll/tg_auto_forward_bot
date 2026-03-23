@@ -1,5 +1,6 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock
+from telegram.error import BadRequest, Forbidden, TimedOut, NetworkError
 from bot.services.publisher import publish_video
 
 @pytest.mark.asyncio
@@ -17,7 +18,7 @@ async def test_publish_video_success():
 @pytest.mark.asyncio
 async def test_publish_video_falls_back_to_document():
     bot = AsyncMock()
-    bot.send_video.side_effect = Exception("codec error")
+    bot.send_video.side_effect = BadRequest("Wrong file identifier")
     bot.send_document.return_value = MagicMock(message_id=99)
     result = await publish_video(
         bot, channel_chat_id=-100123, file_path="/tmp/test.mp4", caption="hello",
@@ -28,7 +29,7 @@ async def test_publish_video_falls_back_to_document():
 @pytest.mark.asyncio
 async def test_publish_video_both_fail():
     bot = AsyncMock()
-    bot.send_video.side_effect = Exception("video error")
+    bot.send_video.side_effect = BadRequest("video error")
     bot.send_document.side_effect = Exception("doc error")
     result = await publish_video(
         bot, channel_chat_id=-100123, file_path="/tmp/test.mp4", caption="hello",
@@ -38,7 +39,7 @@ async def test_publish_video_both_fail():
 @pytest.mark.asyncio
 async def test_publish_video_fallback_truncates_long_caption():
     bot = AsyncMock()
-    bot.send_video.side_effect = Exception("codec error")
+    bot.send_video.side_effect = BadRequest("codec error")
     bot.send_document.return_value = MagicMock(message_id=99)
     long_caption = "a" * 1024
     await publish_video(
@@ -46,3 +47,54 @@ async def test_publish_video_fallback_truncates_long_caption():
     )
     call_kwargs = bot.send_document.call_args.kwargs
     assert len(call_kwargs["caption"]) <= 1024
+    assert "parse_mode" not in call_kwargs
+
+@pytest.mark.asyncio
+async def test_publish_video_forbidden_raises():
+    bot = AsyncMock()
+    bot.send_video.side_effect = Forbidden("bot was kicked")
+    with pytest.raises(Forbidden):
+        await publish_video(
+            bot, channel_chat_id=-100123, file_path="/tmp/test.mp4", caption="hello",
+        )
+
+@pytest.mark.asyncio
+async def test_publish_video_timed_out_raises():
+    bot = AsyncMock()
+    bot.send_video.side_effect = TimedOut()
+    with pytest.raises(TimedOut):
+        await publish_video(
+            bot, channel_chat_id=-100123, file_path="/tmp/test.mp4", caption="hello",
+        )
+
+@pytest.mark.asyncio
+async def test_publish_video_network_error_raises():
+    bot = AsyncMock()
+    bot.send_video.side_effect = NetworkError("connection reset")
+    with pytest.raises(NetworkError):
+        await publish_video(
+            bot, channel_chat_id=-100123, file_path="/tmp/test.mp4", caption="hello",
+        )
+
+@pytest.mark.asyncio
+async def test_publish_video_fallback_strips_html():
+    bot = AsyncMock()
+    bot.send_video.side_effect = BadRequest("codec error")
+    bot.send_document.return_value = MagicMock(message_id=99)
+    await publish_video(
+        bot, channel_chat_id=-100123, file_path="/tmp/test.mp4",
+        caption="<b>hello</b> &amp; world",
+    )
+    call_kwargs = bot.send_document.call_args.kwargs
+    assert "<b>" not in call_kwargs["caption"]
+    assert "hello & world" in call_kwargs["caption"]
+
+@pytest.mark.asyncio
+async def test_publish_video_fallback_no_parse_mode():
+    bot = AsyncMock()
+    bot.send_video.side_effect = BadRequest("codec error")
+    bot.send_document.return_value = MagicMock(message_id=99)
+    await publish_video(
+        bot, channel_chat_id=-100123, file_path="/tmp/test.mp4", caption="test",
+    )
+    assert "parse_mode" not in bot.send_document.call_args.kwargs

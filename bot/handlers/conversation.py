@@ -91,6 +91,7 @@ async def _start_download(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     slot_manager = context.bot_data["slot_manager"]
 
+    tasks = context.bot_data.setdefault("_background_tasks", set())
     task = asyncio.create_task(
         download_and_publish(
             bot=context.bot, slot_manager=slot_manager,
@@ -98,6 +99,9 @@ async def _start_download(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             source_url=source_url, caption=caption, channel_chat_id=channel_chat_id,
         )
     )
+    tasks.add(task)
+    task.add_done_callback(tasks.discard)
+
     def _on_task_done(t):
         if not t.cancelled() and t.exception():
             logger.error("Background download task failed unexpectedly: %s", t.exception())

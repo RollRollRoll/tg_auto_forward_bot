@@ -1,11 +1,19 @@
 from __future__ import annotations
 import logging
+import re
+from html import unescape as html_unescape
 from pathlib import Path
+
 from telegram import Bot
+from telegram.error import BadRequest
 
 logger = logging.getLogger(__name__)
 
-_FALLBACK_SUFFIX = "\n\n<i>(Sent as file — non-streamable format)</i>"
+_FALLBACK_SUFFIX = "\n\n(Sent as file — non-streamable format)"
+
+
+def _strip_html(text: str) -> str:
+    return re.sub(r"<[^>]+>", "", text)
 
 async def publish_video(
     bot: Bot,
@@ -30,17 +38,17 @@ async def publish_video(
             height=height,
         )
         return msg.message_id
-    except Exception as e:
-        logger.warning("send_video failed, falling back to send_document: %s", e)
+    except BadRequest as e:
+        logger.warning("send_video failed (BadRequest), falling back to send_document: %s", e)
 
-    max_caption_len = 1024 - len(_FALLBACK_SUFFIX)
-    fallback_caption = caption[:max_caption_len] + _FALLBACK_SUFFIX
+    plain_caption = html_unescape(_strip_html(caption))
+    max_len = 1024 - len(_FALLBACK_SUFFIX)
+    fallback_caption = plain_caption[:max_len] + _FALLBACK_SUFFIX
     try:
         msg = await bot.send_document(
             chat_id=channel_chat_id,
             document=video_path,
             caption=fallback_caption,
-            parse_mode="HTML",
         )
         return msg.message_id
     except Exception as e:

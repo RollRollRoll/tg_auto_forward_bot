@@ -1,5 +1,6 @@
 from __future__ import annotations
 import re
+from html import unescape as _html_unescape
 from html.parser import HTMLParser
 from io import StringIO
 
@@ -39,7 +40,7 @@ def _pre_escape_bare_angles(text: str) -> str:
 
 class _HTMLSanitizer(HTMLParser):
     def __init__(self):
-        super().__init__()
+        super().__init__(convert_charrefs=False)
         self.result = StringIO()
         self.plain_text = StringIO()
 
@@ -63,11 +64,14 @@ class _HTMLSanitizer(HTMLParser):
         self.plain_text.write(data)
 
     def handle_entityref(self, name):
-        self.result.write(f"&{name};")
-        self.plain_text.write(f"&{name};")
+        entity = f"&{name};"
+        self.result.write(entity)
+        self.plain_text.write(_html_unescape(entity))
 
     def handle_charref(self, name):
-        self.result.write(f"&#{name};")
+        ref = f"&#{name};"
+        self.result.write(ref)
+        self.plain_text.write(_html_unescape(ref))
 
 def sanitize_caption(html: str) -> tuple[str, str | None]:
     preprocessed = _pre_escape_bare_angles(html)

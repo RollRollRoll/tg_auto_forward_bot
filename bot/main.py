@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 
@@ -39,6 +40,18 @@ async def post_init(application) -> None:
 
 
 async def post_shutdown(application) -> None:
+    tasks = application.bot_data.get("_background_tasks", set())
+    if tasks:
+        logger.info("Waiting for %d background task(s) to finish...", len(tasks))
+        done, pending = await asyncio.wait(set(tasks), timeout=120.0)
+        if pending:
+            logger.warning(
+                "Shutdown timeout: %d task(s) still running, cancelling...",
+                len(pending),
+            )
+            for t in pending:
+                t.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
     await close_db()
 
 

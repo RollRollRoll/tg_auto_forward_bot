@@ -74,3 +74,27 @@ class TestSanitizeCaption:
         result, error = sanitize_caption(html)
         assert "<s>strikethrough</s>" in result
         assert error is None
+
+    def test_entity_ref_counted_as_one_char(self):
+        # &amp; renders as 1 char, so 1023 + 1 = 1024 (at limit)
+        html = "a" * 1023 + "&amp;"
+        result, error = sanitize_caption(html)
+        assert error is None
+
+    def test_char_ref_counted_as_one_char(self):
+        # &#60; renders as 1 char (<), so 1023 + 1 = 1024
+        html = "a" * 1023 + "&#60;"
+        result, error = sanitize_caption(html)
+        assert error is None
+
+    def test_entity_over_limit(self):
+        # 1024 + 1 rendered char = over limit
+        html = "a" * 1024 + "&amp;"
+        result, error = sanitize_caption(html)
+        assert error is not None
+        assert "1025" in error
+
+    def test_entity_preserved_in_output(self):
+        result, error = sanitize_caption("&amp;")
+        assert "&amp;" in result
+        assert error is None
