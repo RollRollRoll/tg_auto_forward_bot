@@ -28,6 +28,9 @@ htmlcov/
 # Downloads temp
 downloads/
 
+# Cookies (sensitive)
+cookies.txt
+
 # OS
 .DS_Store
 

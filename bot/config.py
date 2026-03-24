@@ -13,3 +13,6 @@ SUPER_ADMIN_ID: int = int(os.environ["SUPER_ADMIN_ID"])
 DOWNLOAD_DIR: str = os.environ.get(
     "DOWNLOAD_DIR", "/var/lib/telegram-bot-api/downloads"
 )
+
+# Path to cookies.txt for yt-dlp authentication (e.g. Twitter/X)
+COOKIES_FILE: str = os.environ.get("COOKIES_FILE", "/app/data/cookies.txt")

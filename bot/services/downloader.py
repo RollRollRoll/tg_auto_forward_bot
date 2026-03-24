@@ -8,7 +8,7 @@ from pathlib import Path
 
 import yt_dlp
 
-from bot.config import DOWNLOAD_DIR
+from bot.config import COOKIES_FILE, DOWNLOAD_DIR
 
 
 class DownloadSlotManager:
@@ -80,6 +80,9 @@ async def download_video(url: str, *, max_resolution: int = 1080) -> dict:
         "quiet": True,
         "no_warnings": True,
     }
+
+    if os.path.isfile(COOKIES_FILE):
+        ydl_opts["cookiefile"] = COOKIES_FILE
 
     loop = asyncio.get_running_loop()
     try:
