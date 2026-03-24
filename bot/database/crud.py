@@ -86,3 +86,11 @@ async def update_post_log_status(db: aiosqlite.Connection, log_id: int, *, statu
     params.append(log_id)
     await db.execute(f"UPDATE post_logs SET {', '.join(fields)} WHERE id = ?", params)
     await db.commit()
+
+
+async def list_recent_post_logs(db: aiosqlite.Connection, *, limit: int = 5) -> list[dict]:
+    cursor = await db.execute(
+        "SELECT source_url, status, error_message, created_at FROM post_logs ORDER BY created_at DESC LIMIT ?",
+        (limit,),
+    )
+    return [dict(row) for row in await cursor.fetchall()]

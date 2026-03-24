@@ -27,13 +27,23 @@ async def download_and_publish(
         await bot.send_message(chat_id=user_chat_id, text="Insufficient disk space, please try again later.")
         return
 
-    if not await slot_manager.try_acquire_slot(max_concurrent):
+    task_id = await slot_manager.try_acquire_slot(max_concurrent, url=source_url, user_id=user_id)
+    if task_id is None:
         active = slot_manager.active_count
         await bot.send_message(
             chat_id=user_chat_id,
             text=f"Server busy ({active}/{max_concurrent} download slots in use). Please resend your link to try again.",
         )
         return
+
+    def _progress_hook(d: dict) -> None:
+        if d.get("status") == "downloading":
+            total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+            downloaded = d.get("downloaded_bytes", 0)
+            pct = (downloaded / total * 100) if total > 0 else 0.0
+            slot_manager.update_progress(task_id, pct, "downloading")
+        elif d.get("status") == "finished":
+            slot_manager.update_progress(task_id, 100.0, "processing")
 
     log_id = None
     tmp_dir = None
@@ -43,7 +53,7 @@ async def download_and_publish(
             channel_chat_id=channel_chat_id, caption=caption,
         )
 
-        result = await download_video(source_url, max_resolution=max_resolution)
+        result = await download_video(source_url, max_resolution=max_resolution, progress_callback=_progress_hook)
         tmp_dir = result["tmp_dir"]
 
         if result["file_size_mb"] > max_file_size:
@@ -51,6 +61,7 @@ async def download_and_publish(
             await bot.send_message(chat_id=user_chat_id, text=f"Video too large ({result['file_size_mb']:.1f} MB), exceeds limit ({max_file_size} MB).")
             return
 
+        slot_manager.update_progress(task_id, 100.0, "publishing")
         await update_post_log_status(db, log_id, status="publishing")
         message_id = await publish_video(
             bot, channel_chat_id=channel_chat_id, file_path=result["file_path"],
@@ -70,6 +81,6 @@ async def download_and_publish(
             await update_post_log_status(db, log_id, status="failed", error_message=str(e))
         await bot.send_message(chat_id=user_chat_id, text=f"Download failed: {e}")
     finally:
-        await slot_manager.release_slot()
+        await slot_manager.release_slot(task_id)
         if tmp_dir:
             shutil.rmtree(tmp_dir, ignore_errors=True)

@@ -13,23 +13,49 @@ from bot.config import COOKIES_FILE, DOWNLOAD_DIR
 
 class DownloadSlotManager:
     def __init__(self):
-        self._active_downloads: int = 0
+        self._tasks: dict[int, dict] = {}
+        self._next_id: int = 0
         self._lock = asyncio.Lock()
 
     @property
     def active_count(self) -> int:
-        return self._active_downloads
+        return len(self._tasks)
 
-    async def try_acquire_slot(self, max_slots: int) -> bool:
+    async def try_acquire_slot(self, max_slots: int, *, url: str = "", user_id: int = 0) -> int | None:
         async with self._lock:
-            if self._active_downloads >= max_slots:
-                return False
-            self._active_downloads += 1
-            return True
+            if len(self._tasks) >= max_slots:
+                return None
+            self._next_id += 1
+            self._tasks[self._next_id] = {
+                "url": url,
+                "user_id": user_id,
+                "start_time": time.time(),
+                "progress": 0.0,
+                "status": "waiting",
+            }
+            return self._next_id
 
-    async def release_slot(self) -> None:
+    def update_progress(self, task_id: int, progress: float, status: str = "downloading") -> None:
+        if task_id in self._tasks:
+            self._tasks[task_id]["progress"] = progress
+            self._tasks[task_id]["status"] = status
+
+    async def release_slot(self, task_id: int | None = None) -> None:
         async with self._lock:
-            self._active_downloads = max(0, self._active_downloads - 1)
+            if task_id is not None:
+                self._tasks.pop(task_id, None)
+            else:
+                # fallback: remove the oldest task
+                if self._tasks:
+                    oldest = min(self._tasks)
+                    del self._tasks[oldest]
+
+    def get_active_tasks(self) -> list[dict]:
+        now = time.time()
+        return [
+            {"task_id": tid, "elapsed": now - t["start_time"], **t}
+            for tid, t in self._tasks.items()
+        ]
 
 
 def check_disk_space(max_concurrent: int, max_file_size_mb: int) -> tuple[bool, int]:
@@ -55,7 +81,12 @@ def cleanup_stale_files(max_age_seconds: int = 3600) -> int:
     return removed
 
 
-async def download_video(url: str, *, max_resolution: int = 1080) -> dict:
+async def download_video(
+    url: str,
+    *,
+    max_resolution: int = 1080,
+    progress_callback: callable | None = None,
+) -> dict:
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     tmp_dir = tempfile.mkdtemp(dir=DOWNLOAD_DIR)
     os.chmod(tmp_dir, 0o755)
@@ -80,6 +111,9 @@ async def download_video(url: str, *, max_resolution: int = 1080) -> dict:
         "quiet": True,
         "no_warnings": True,
     }
+
+    if progress_callback is not None:
+        ydl_opts["progress_hooks"] = [progress_callback]
 
     if os.path.isfile(COOKIES_FILE):
         ydl_opts["cookiefile"] = COOKIES_FILE
