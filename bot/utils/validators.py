@@ -4,19 +4,10 @@ from html import unescape as _html_unescape
 from html.parser import HTMLParser
 from io import StringIO
 
-_X_URL_PATTERN = re.compile(
-    r"https?://(?:www\.)?(?:twitter\.com|x\.com)/\w+/status/\d+",
-    re.IGNORECASE,
-)
-_TCO_PATTERN = re.compile(r"https?://t\.co/\w+", re.IGNORECASE)
-
-def is_x_video_url(text: str) -> bool:
-    if not text:
-        return False
-    return bool(_X_URL_PATTERN.search(text) or _TCO_PATTERN.search(text))
+_URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
 
 def extract_url(text: str) -> str | None:
-    m = _X_URL_PATTERN.search(text) or _TCO_PATTERN.search(text)
+    m = _URL_PATTERN.search(text)
     return m.group(0) if m else None
 
 async def resolve_t_co(url: str) -> str:

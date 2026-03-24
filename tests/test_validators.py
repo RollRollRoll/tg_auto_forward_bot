@@ -1,23 +1,25 @@
 import pytest
-from bot.utils.validators import is_x_video_url, sanitize_caption
+from bot.utils.validators import extract_url, sanitize_caption
 
-class TestIsXVideoUrl:
+class TestExtractUrl:
     def test_x_com_status_url(self):
-        assert is_x_video_url("https://x.com/user/status/1234567890") is True
+        assert extract_url("https://x.com/user/status/1234567890") == "https://x.com/user/status/1234567890"
     def test_twitter_com_status_url(self):
-        assert is_x_video_url("https://twitter.com/user/status/1234567890") is True
-    def test_x_com_with_query_params(self):
-        assert is_x_video_url("https://x.com/user/status/123?s=20") is True
+        assert extract_url("https://twitter.com/user/status/1234567890") == "https://twitter.com/user/status/1234567890"
+    def test_youtube_url(self):
+        assert extract_url("https://youtube.com/watch?v=abc") == "https://youtube.com/watch?v=abc"
+    def test_tiktok_url(self):
+        assert extract_url("https://www.tiktok.com/@user/video/123") == "https://www.tiktok.com/@user/video/123"
+    def test_instagram_url(self):
+        assert extract_url("https://www.instagram.com/reel/abc123/") == "https://www.instagram.com/reel/abc123/"
     def test_t_co_short_link(self):
-        assert is_x_video_url("https://t.co/abc123") is True
-    def test_invalid_url(self):
-        assert is_x_video_url("https://youtube.com/watch?v=abc") is False
+        assert extract_url("https://t.co/abc123") == "https://t.co/abc123"
+    def test_url_in_text(self):
+        assert extract_url("check this https://example.com/video ok") == "https://example.com/video"
     def test_plain_text(self):
-        assert is_x_video_url("hello world") is False
+        assert extract_url("hello world") is None
     def test_empty_string(self):
-        assert is_x_video_url("") is False
-    def test_x_com_without_status(self):
-        assert is_x_video_url("https://x.com/user") is False
+        assert extract_url("") is None
 
 class TestSanitizeCaption:
     def test_allowed_tags_preserved(self):

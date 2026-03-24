@@ -7,6 +7,7 @@ from telegram.ext import ConversationHandler
 from bot.handlers.conversation import (
     WAITING_CAPTION,
     WAITING_CHANNEL,
+    WAITING_RESOLUTION,
     _start_download,
     cancel_handler,
     caption_handler,
@@ -56,7 +57,8 @@ async def test_caption_handler_single_channel():
     ctx.user_data["source_url"] = "https://x.com/u/status/1"
     channels = [{"chat_id": -100123, "title": "Test"}]
     with patch("bot.handlers.conversation.get_db", new_callable=AsyncMock), \
-         patch("bot.handlers.conversation.list_channels", new_callable=AsyncMock, return_value=channels):
+         patch("bot.handlers.conversation.list_channels", new_callable=AsyncMock, return_value=channels), \
+         patch("bot.handlers.conversation.extract_available_resolutions", new_callable=AsyncMock, return_value=[720]):
         result = await caption_handler(update, ctx)
     assert result == ConversationHandler.END
     ctx.application.create_task.assert_called_once()
@@ -64,16 +66,16 @@ async def test_caption_handler_single_channel():
 
 
 @pytest.mark.asyncio
-async def test_caption_handler_multi_channel_shows_keyboard():
+async def test_caption_handler_multi_resolution_shows_keyboard():
     update = _make_update("valid caption")
     ctx = _make_context()
     ctx.user_data["source_url"] = "https://x.com/u/status/1"
     channels = [{"chat_id": -100123, "title": "Chan A"}, {"chat_id": -100456, "title": "Chan B"}]
     with patch("bot.handlers.conversation.get_db", new_callable=AsyncMock), \
-         patch("bot.handlers.conversation.list_channels", new_callable=AsyncMock, return_value=channels):
+         patch("bot.handlers.conversation.list_channels", new_callable=AsyncMock, return_value=channels), \
+         patch("bot.handlers.conversation.extract_available_resolutions", new_callable=AsyncMock, return_value=[720, 1080]):
         result = await caption_handler(update, ctx)
-    assert result == WAITING_CHANNEL
-    assert "reply_markup" in update.message.reply_text.call_args.kwargs
+    assert result == WAITING_RESOLUTION
 
 
 @pytest.mark.asyncio

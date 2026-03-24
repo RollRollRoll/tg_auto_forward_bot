@@ -6,14 +6,15 @@ from bot.database.connection import get_db
 from bot.database.crud import is_admin
 from bot.handlers.filters import private_chat_only
 
-HELP_TEXT = """<b>X Video Forward Bot</b>
+HELP_TEXT = """<b>Video Forward Bot</b>
 
-Send me a Twitter/X video link and I'll publish it to a Telegram channel.
+Send me a video link and I'll publish it to a Telegram channel.
+Supports YouTube, X/Twitter, TikTok, Instagram, and 1000+ sites.
 
 <b>How to use:</b>
-1. Send an X video link (x.com or twitter.com)
+1. Send a video link
 2. I'll ask you for a caption
-3. Choose the target channel (if multiple)
+3. Choose resolution and target channel
 4. I'll download and publish!
 
 <b>Caption format (HTML):</b>

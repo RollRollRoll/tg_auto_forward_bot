@@ -13,7 +13,7 @@ from bot.handlers.admin import (
 from bot.handlers.filters import admin_only, private_chat_only
 from bot.handlers.start import HELP_TEXT
 
-MENU_GREETING = "<b>X Video Forward Bot</b>\n\nSelect an option:"
+MENU_GREETING = "<b>Video Forward Bot</b>\n\nSelect an option:"
 
 
 def build_main_keyboard(user_id: int) -> InlineKeyboardMarkup:

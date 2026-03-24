@@ -58,6 +58,33 @@ class DownloadSlotManager:
         ]
 
 
+async def extract_available_resolutions(url: str) -> list[int]:
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+    }
+    if os.path.isfile(COOKIES_FILE):
+        ydl_opts["cookiefile"] = COOKIES_FILE
+
+    loop = asyncio.get_running_loop()
+    info = await loop.run_in_executor(None, _do_extract, ydl_opts, url)
+
+    formats = info.get("formats") or []
+    heights: set[int] = set()
+    for f in formats:
+        h = f.get("height")
+        if h and h > 0:
+            heights.add(h)
+
+    return sorted(heights)
+
+
+def _do_extract(ydl_opts: dict, url: str) -> dict:
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+        return info or {}
+
+
 def check_disk_space(max_concurrent: int, max_file_size_mb: int) -> tuple[bool, int]:
     usage = shutil.disk_usage(DOWNLOAD_DIR)
     free_mb = usage.free // (1024 * 1024)

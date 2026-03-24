@@ -10,8 +10,9 @@ from telegram.ext import (
 from bot.database.connection import get_db
 from bot.database.crud import list_channels
 from bot.handlers.filters import admin_only, private_chat_only
+from bot.services.downloader import extract_available_resolutions
 from bot.services.pipeline import download_and_publish
-from bot.utils.validators import extract_url, resolve_t_co, sanitize_caption
+from bot.utils.validators import extract_url, sanitize_caption
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +20,11 @@ WAITING_CAPTION = 0
 WAITING_RESOLUTION = 1
 WAITING_CHANNEL = 2
 
-_RESOLUTION_OPTIONS = [("480p", "480"), ("720p", "720"), ("1080p", "1080"), ("4K", "2160")]
+_RESOLUTION_LABELS = {
+    240: "240p", 360: "360p", 480: "480p",
+    720: "720p HD", 1080: "1080p FHD",
+    1440: "1440p 2K", 2160: "4K",
+}
 
 
 @private_chat_only
@@ -29,29 +34,54 @@ async def entry_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     if not url:
         return ConversationHandler.END
 
-    if "t.co/" in url:
-        try:
-            url = await resolve_t_co(url)
-        except Exception:
-            await update.message.reply_text("Failed to resolve short link. Please send the full URL.")
-            return ConversationHandler.END
-
     context.user_data["source_url"] = url
     await update.message.reply_text("Link received. Please enter the caption (HTML format supported, max 1024 chars).\nSend /skip to publish without caption.")
     return WAITING_CAPTION
 
 
-async def _ask_resolution(msg) -> int:
-    keyboard = [
-        [InlineKeyboardButton(label, callback_data=f"res:{value}") for label, value in _RESOLUTION_OPTIONS]
-    ]
-    await msg.reply_text("Select video resolution:", reply_markup=InlineKeyboardMarkup(keyboard))
+async def _fetch_and_ask_resolution(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    url = context.user_data["source_url"]
+    msg = update.callback_query.message if update.callback_query else update.message
+    status_msg = await msg.reply_text("Checking available resolutions...")
+
+    try:
+        heights = await extract_available_resolutions(url)
+    except Exception:
+        logger.warning("Failed to extract formats for %s", url)
+        heights = []
+
+    if not heights:
+        await status_msg.edit_text("No video found at this URL, or the site is not supported.")
+        return ConversationHandler.END
+
+    resolutions = heights
+
+    if len(resolutions) == 1:
+        context.user_data["max_resolution"] = resolutions[0]
+        label = _RESOLUTION_LABELS.get(resolutions[0], f"{resolutions[0]}p")
+        await status_msg.edit_text(f"Only one resolution available: {label}. Proceeding...")
+        return await _ask_channel_or_download(update, context, status_msg)
+
+    keyboard = []
+    row: list[InlineKeyboardButton] = []
+    for h in resolutions:
+        label = _RESOLUTION_LABELS.get(h, f"{h}p")
+        row.append(InlineKeyboardButton(label, callback_data=f"res:{h}"))
+        if len(row) >= 3:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+
+    await status_msg.edit_text(
+        "Select video resolution:", reply_markup=InlineKeyboardMarkup(keyboard),
+    )
     return WAITING_RESOLUTION
 
 
 async def skip_caption_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data["caption"] = ""
-    return await _ask_resolution(update.message)
+    return await _fetch_and_ask_resolution(update, context)
 
 
 async def caption_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -62,7 +92,29 @@ async def caption_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return WAITING_CAPTION
 
     context.user_data["caption"] = sanitized
-    return await _ask_resolution(update.message)
+    return await _fetch_and_ask_resolution(update, context)
+
+
+async def _ask_channel_or_download(update: Update, context: ContextTypes.DEFAULT_TYPE, reply_msg=None) -> int:
+    db = await get_db()
+    channels = await list_channels(db)
+
+    if not channels:
+        msg = reply_msg or (update.callback_query.message if update.callback_query else update.message)
+        await msg.reply_text("No channels configured. Use /add_channel first.")
+        return ConversationHandler.END
+
+    if len(channels) == 1:
+        context.user_data["channel_chat_id"] = channels[0]["chat_id"]
+        return await _start_download(update, context, reply_msg)
+
+    msg = reply_msg or (update.callback_query.message if update.callback_query else update.message)
+    keyboard = [
+        [InlineKeyboardButton(ch["title"], callback_data=f"ch:{ch['chat_id']}")]
+        for ch in channels
+    ]
+    await msg.reply_text("Select target channel:", reply_markup=InlineKeyboardMarkup(keyboard))
+    return WAITING_CHANNEL
 
 
 async def resolution_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -70,24 +122,7 @@ async def resolution_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.answer()
     resolution = int(query.data.removeprefix("res:"))
     context.user_data["max_resolution"] = resolution
-
-    db = await get_db()
-    channels = await list_channels(db)
-
-    if not channels:
-        await query.message.reply_text("No channels configured. Use /add_channel first.")
-        return ConversationHandler.END
-
-    if len(channels) == 1:
-        context.user_data["channel_chat_id"] = channels[0]["chat_id"]
-        return await _start_download(update, context)
-
-    keyboard = [
-        [InlineKeyboardButton(ch["title"], callback_data=f"ch:{ch['chat_id']}")]
-        for ch in channels
-    ]
-    await query.message.reply_text("Select target channel:", reply_markup=InlineKeyboardMarkup(keyboard))
-    return WAITING_CHANNEL
+    return await _ask_channel_or_download(update, context)
 
 
 async def channel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -103,14 +138,14 @@ async def cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     return ConversationHandler.END
 
 
-async def _start_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def _start_download(update: Update, context: ContextTypes.DEFAULT_TYPE, reply_msg=None) -> int:
     source_url = context.user_data["source_url"]
     caption = context.user_data["caption"]
     channel_chat_id = context.user_data["channel_chat_id"]
     user_id = update.effective_user.id
     user_chat_id = update.effective_chat.id
 
-    msg = update.callback_query.message if update.callback_query else update.message
+    msg = reply_msg or (update.callback_query.message if update.callback_query else update.message)
     await msg.reply_text("Task accepted. Downloading video...")
 
     slot_manager = context.bot_data["slot_manager"]
@@ -132,9 +167,7 @@ async def _start_download(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 def build_conversation_handler() -> ConversationHandler:
-    url_filter = filters.TEXT & filters.Regex(
-        r"https?://(?:(?:twitter|x)\.com/\w+/status/\d+|t\.co/\w+)"
-    )
+    url_filter = filters.TEXT & filters.Regex(r"https?://\S+")
     return ConversationHandler(
         entry_points=[MessageHandler(url_filter, entry_handler)],
         states={

@@ -1,13 +1,17 @@
-# Telegram X Video Forward Bot
+# Telegram Video Forward Bot
 
-A Telegram Bot that receives X (Twitter) video links, downloads videos with yt-dlp, and publishes them to Telegram Channels with custom captions.
+A Telegram Bot that downloads videos from any supported platform (YouTube, X/Twitter, TikTok, Instagram, and 1000+ sites via yt-dlp) and publishes them to Telegram Channels with custom captions.
 
 ## Features
 
+- **Multi-platform support** — YouTube, X/Twitter, TikTok, Instagram, and 1000+ sites powered by yt-dlp
+- **Auto-detect resolutions** — dynamically fetches available video qualities from each link
+- **Inline button menu** — `/start` shows a dashboard with quick-access buttons (Tasks, Channels, Settings, etc.)
+- **Bot commands menu** — all commands registered via Telegram Menu button
+- **Download task tracking** — real-time progress bars, elapsed time, and recent task history via `/tasks`
 - Private chat interaction with authorized admins
 - HTML-formatted captions (bold, italic, links, code)
 - Multi-channel support with inline keyboard selection
-- Per-link resolution selection (480p / 720p / 1080p / 4K)
 - Skip caption with `/skip` command
 - Configurable video quality and concurrent download limits
 - Auto-upgrade yt-dlp on container startup
@@ -49,21 +53,25 @@ python -m bot.main
 
 | Command | Description |
 |---------|-------------|
-| `/start` | Welcome and help |
-| `/help` | Show help |
+| `/start` | Open button menu (admins) / show help |
+| `/help` | Show help text |
+| `/tasks` | View active downloads & recent tasks |
 | `/add_channel <chat_id>` | Add target channel |
+| `/remove_channel <chat_id>` | Remove channel |
 | `/list_channels` | List channels |
 | `/settings` | View all settings |
 | `/set <key> <value>` | Update setting |
-
+| `/add_admin <user_id>` | Add admin (super admin only) |
+| `/remove_admin <user_id>` | Remove admin (super admin only) |
+| `/list_admins` | List admins (super admin only) |
 | `/skip` | Skip caption (during link flow) |
 | `/cancel` | Cancel current operation |
 
-See `/help` in the bot for full command list.
+All commands are also accessible via the Telegram **Menu** button and the inline keyboard dashboard on `/start`.
 
-## Cookies 配置（解决 Twitter/X 下载失败）
+## Cookies 配置（解决部分站点下载失败）
 
-当遇到 `Bad guest token` 错误时，需要配置 cookies.txt：
+某些站点（如 Twitter/X）可能需要登录态才能下载视频。当遇到 `Bad guest token` 或 403 错误时，配置 cookies.txt：
 
 ### 1. 获取 cookies.txt
 1. 安装浏览器扩展：
