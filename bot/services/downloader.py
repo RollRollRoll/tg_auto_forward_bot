@@ -58,6 +58,7 @@ def cleanup_stale_files(max_age_seconds: int = 3600) -> int:
 async def download_video(url: str, *, max_resolution: int = 1080) -> dict:
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     tmp_dir = tempfile.mkdtemp(dir=DOWNLOAD_DIR)
+    os.chmod(tmp_dir, 0o755)
 
     ydl_opts = {
         "format": (
