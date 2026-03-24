@@ -15,11 +15,11 @@ logger = logging.getLogger(__name__)
 async def download_and_publish(
     *, bot: Bot, slot_manager: DownloadSlotManager, user_chat_id: int,
     user_id: int, source_url: str, caption: str, channel_chat_id: int,
+    max_resolution: int = 1080,
 ) -> None:
     db = await get_db()
     max_concurrent = int(await get_setting(db, "max_concurrent_downloads") or "2")
     max_file_size = int(await get_setting(db, "max_file_size_mb") or "2000")
-    max_resolution = int(await get_setting(db, "max_resolution") or "1080")
 
     # Disk check BEFORE slot acquisition (per spec)
     has_space, free_mb = check_disk_space(max_concurrent, max_file_size)

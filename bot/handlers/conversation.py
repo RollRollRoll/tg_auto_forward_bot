@@ -16,7 +16,10 @@ from bot.utils.validators import extract_url, resolve_t_co, sanitize_caption
 logger = logging.getLogger(__name__)
 
 WAITING_CAPTION = 0
-WAITING_CHANNEL = 1
+WAITING_RESOLUTION = 1
+WAITING_CHANNEL = 2
+
+_RESOLUTION_OPTIONS = [("480p", "480"), ("720p", "720"), ("1080p", "1080"), ("4K", "2160")]
 
 
 @private_chat_only
@@ -34,8 +37,21 @@ async def entry_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             return ConversationHandler.END
 
     context.user_data["source_url"] = url
-    await update.message.reply_text("Link received. Please enter the caption (HTML format supported, max 1024 chars):")
+    await update.message.reply_text("Link received. Please enter the caption (HTML format supported, max 1024 chars).\nSend /skip to publish without caption.")
     return WAITING_CAPTION
+
+
+async def _ask_resolution(msg) -> int:
+    keyboard = [
+        [InlineKeyboardButton(label, callback_data=f"res:{value}") for label, value in _RESOLUTION_OPTIONS]
+    ]
+    await msg.reply_text("Select video resolution:", reply_markup=InlineKeyboardMarkup(keyboard))
+    return WAITING_RESOLUTION
+
+
+async def skip_caption_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data["caption"] = ""
+    return await _ask_resolution(update.message)
 
 
 async def caption_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -46,11 +62,20 @@ async def caption_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return WAITING_CAPTION
 
     context.user_data["caption"] = sanitized
+    return await _ask_resolution(update.message)
+
+
+async def resolution_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    resolution = int(query.data.removeprefix("res:"))
+    context.user_data["max_resolution"] = resolution
+
     db = await get_db()
     channels = await list_channels(db)
 
     if not channels:
-        await update.message.reply_text("No channels configured. Use /add_channel first.")
+        await query.message.reply_text("No channels configured. Use /add_channel first.")
         return ConversationHandler.END
 
     if len(channels) == 1:
@@ -58,17 +83,17 @@ async def caption_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return await _start_download(update, context)
 
     keyboard = [
-        [InlineKeyboardButton(ch["title"], callback_data=str(ch["chat_id"]))]
+        [InlineKeyboardButton(ch["title"], callback_data=f"ch:{ch['chat_id']}")]
         for ch in channels
     ]
-    await update.message.reply_text("Select target channel:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.message.reply_text("Select target channel:", reply_markup=InlineKeyboardMarkup(keyboard))
     return WAITING_CHANNEL
 
 
 async def channel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
-    context.user_data["channel_chat_id"] = int(query.data)
+    context.user_data["channel_chat_id"] = int(query.data.removeprefix("ch:"))
     return await _start_download(update, context)
 
 
@@ -90,11 +115,14 @@ async def _start_download(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     slot_manager = context.bot_data["slot_manager"]
 
+    max_resolution = context.user_data.get("max_resolution", 1080)
+
     context.application.create_task(
         download_and_publish(
             bot=context.bot, slot_manager=slot_manager,
             user_chat_id=user_chat_id, user_id=user_id,
             source_url=source_url, caption=caption, channel_chat_id=channel_chat_id,
+            max_resolution=max_resolution,
         ),
         update=update,
     )
@@ -110,8 +138,12 @@ def build_conversation_handler() -> ConversationHandler:
     return ConversationHandler(
         entry_points=[MessageHandler(url_filter, entry_handler)],
         states={
-            WAITING_CAPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, caption_handler)],
-            WAITING_CHANNEL: [CallbackQueryHandler(channel_handler)],
+            WAITING_CAPTION: [
+                CommandHandler("skip", skip_caption_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, caption_handler),
+            ],
+            WAITING_RESOLUTION: [CallbackQueryHandler(resolution_handler, pattern=r"^res:")],
+            WAITING_CHANNEL: [CallbackQueryHandler(channel_handler, pattern=r"^ch:")],
         },
         fallbacks=[CommandHandler("cancel", cancel_handler)],
         per_user=True,
